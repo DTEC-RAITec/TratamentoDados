@@ -1,10 +1,8 @@
- #include "BluetoothSerial.h"
+#include "BluetoothSerial.h"
 
-// Pino do sensor de leitura do feixe
 #define SENSOR_PIN 23
-
-// Tempo de trava (debounce) em milissegundos para evitar leituras duplas (2 segundos)
 #define TEMPO_TRAVA 2000
+#define TIMEOUT_VOLTA 30000
 
 BluetoothSerial SerialBT;
 
@@ -14,21 +12,17 @@ unsigned long tempoInicio = 0;
 unsigned long tempoVolta = 0;
 unsigned long ultimoDisparo = 0;
 
-// Função da interrupção (executada imediatamente quando o feixe é cortado)
+// Guarda a identificação recebida do computador (Ex: "1_1" -> ID 1, Tentativa 1)
+String competidorAtual = "1_1"; 
+
 void IRAM_ATTR trataPassagem() {
   sensorDisparado = true;
 }
 
 void setup() {
-Serial.begin(115200);
-
-// Inicializa o Bluetooth com o nome visível no celular/PC
+  Serial.begin(115200);
   SerialBT.begin("ESP32_Cronometro");
-
-// Configura o pino de sinal com resistor Pull-Up interno
   pinMode(SENSOR_PIN, INPUT_PULLUP);
-
-// Configura a interrupção no pino 23 para disparar quando o sinal for para GND (FALLING)
   attachInterrupt(digitalPinToInterrupt(SENSOR_PIN), trataPassagem, FALLING);
 
   Serial.println("--- CRONÔMETRO PRONTO ---");
@@ -36,43 +30,47 @@ Serial.begin(115200);
 }
 
 void loop() {
-// 1. PROCESSAMENTO DO CRONÔMETRO
-  if (sensorDisparado) {
-
-  sensorDisparado = false;
   unsigned long agora = millis();
 
-// Filtra ruídos e picos de disparo repetidos no feixe
-  if (agora - ultimoDisparo > TEMPO_TRAVA) {
-  ultimoDisparo = agora;
+  // 1. LEITURA DE COMANDOS DO COMPUTADOR (Recebe o ID e Tentativa atualizados)
+  if (SerialBT.available()) {
+    String comando = SerialBT.readStringUntil('\n');
+    comando.trim();
+    if (comando.length() > 0) {
+      competidorAtual = comando;
+      Serial.println("Pista atualizada para: " + competidorAtual);
+    }
+  }
 
-  if (!cronometroAtivo) {
-// Início da contagem
-  tempoInicio = agora;
-  cronometroAtivo = true;
-  String msgInicio = "--> CRONÔMETRO INICIADO!";
-  Serial.println(msgInicio);
-  SerialBT.println(msgInicio);
-  } else {
-// Fim da contagem e cálculo da volta
-  tempoVolta = agora - tempoInicio;
-  cronometroAtivo = false;
+  // 2. TIMEOUT DE SEGURANÇA (Caso o carrinho capote, desiste após 30s)
+  if (cronometroAtivo && (agora - tempoInicio > TIMEOUT_VOLTA)) {
+    cronometroAtivo = false;
+    Serial.println("ERRO: TIMEOUT! VOLTA ABORTADA.");
+    SerialBT.println("ERRO: TIMEOUT! VOLTA ABORTADA.");
+  }
 
-  float segundos = tempoVolta / 1000.0;
-  String msgResultado = "TEMPO DE VOLTA: " + String(segundos, 3) + " s";
+  // 3. PROCESSAMENTO DO SENSOR
+  if (sensorDisparado) {
+    sensorDisparado = false;
 
-  Serial.println(msgResultado);
-  SerialBT.println(msgResultado);
+    if (agora - ultimoDisparo > TEMPO_TRAVA) {
+      ultimoDisparo = agora;
+
+      if (!cronometroAtivo) {
+        tempoInicio = agora;
+        cronometroAtivo = true;
+        Serial.println("--> CRONÔMETRO INICIADO [" + competidorAtual + "]");
+      } else {
+        tempoVolta = agora - tempoInicio;
+        cronometroAtivo = false;
+
+        float segundos = tempoVolta / 1000.0;
+        // PACOTE AMARRADO: Devolve o ID, a Tentativa e o Tempo exato
+        String msgResultado = "TEMPO_FINAL:" + competidorAtual + ":" + String(segundos, 3);
+
+        Serial.println(msgResultado);
+        SerialBT.println(msgResultado);
+      }
+    }
   }
 }
-}
-
-// 2. PONTE DE COMUNICAÇÃO SERIAL <-> BLUETOOTH (Para troca de mensagens no terminal)
-if (SerialBT.available()) {
-  Serial.write(SerialBT.read());
-}
-
-if (Serial.available()) {
-SerialBT.write(Serial.read());
-}
-} 
